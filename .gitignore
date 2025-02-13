@@ -1,0 +1,42 @@
+# Виртуальное окружение
+venv/
+venv_evs/
+
+# Файлы конфигурации с токенами
+config.py
+.env
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Логи
+logs/
+*.log
+*.out
+*.err
+
+# Файлы зависимостей (если используешь venv)
+Pipfile
+Pipfile.lock
+
+
+# Игнорируем файлы IDE (PyCharm, VS Code)
+.idea/
+.vscode/
+*.iml
+
+# Системные файлы macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Системные файлы Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Системные файлы Linux
+*~
