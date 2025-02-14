@@ -12,7 +12,10 @@ from collections import defaultdict
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 
-# Этапы голосования (для удобства)
+# Укажите имя вашего бота (без символа @)
+BOT_USERNAME = "LunchBuddy1Bot"
+
+# Этапы опроса
 OFFICE, CUISINE, RESTRICTIONS, BUDGET, WALK_TIME = range(5)
 
 # Карты для преобразования текстовых вариантов в числа (для итогового словаря)
@@ -28,31 +31,25 @@ WALK_TIME_MAP = {
     "🚶 До 15 минут": 15
 }
 
+# Глобальное хранилище агрегированных данных
 def init_group_data():
-    """
-    Структура данных опроса.
-    Для вопросов с одним выбором (офис, бюджет) будем хранить словари:
-      user_id -> выбранный вариант.
-    Для вопросов с несколькими вариантами (кухня, ограничения, время) – defaultdict(set).
-    """
     return {
         "office": {},           # {user_id: выбранный офис}
-        "wanted_cuisines": defaultdict(set),  # {вариант: {user_id1, user_id2, ...}}
+        "wanted_cuisines": defaultdict(set),  # {вариант: {user_id, ...}}
         "food_restrictions": defaultdict(set),
         "price_limit": {},      # {user_id: выбранный чек}
         "walk_time": defaultdict(set),
-        "all_users": set()      # для подсчёта общего числа участников
+        "all_users": set()      # множество всех, кто прошёл опрос
     }
 
 def create_inline_keyboard(options, prefix, selected_values, next_step=None, prev_step=None):
     """
-    Формирует клавиатуру из вариантов.
-      options     - список вариантов (строк)
-      prefix      - префикс для callback_data (например, "office")
-      selected_values - множество выбранных вариантов (для много-выбора) 
-                         или множество из одного элемента (для единственного выбора)
-      next_step   - если указан, добавляет кнопку "➡️ Далее" с callback_data "next_{next_step}"
-      prev_step   - если указан, добавляет кнопку "⬅️ Назад" с callback_data "prev_{prev_step}"
+    Создает инлайн-клавиатуру.
+      options         - список вариантов (строк)
+      prefix          - префикс для callback_data (например, "office")
+      selected_values - множество выбранных вариантов (для множественного или единственного выбора)
+      next_step       - если указан, добавляется кнопка "➡️ Далее"
+      prev_step       - если указан, добавляется кнопка "⬅️ Назад"
     """
     keyboard = []
     for i, option in enumerate(options):
@@ -81,16 +78,39 @@ restriction_options = [
 budget_options = ["💵 До 500 руб.", "💵 До 1000 руб.", "💵 До 1500 руб.", "💵 Без разницы"]
 walk_time_options = ["🚶 До 5 минут", "🚶 До 10 минут", "🚶 До 15 минут"]
 
-# Команда /start — сбрасываем данные и начинаем опрос
+# Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.bot_data["group_answers"] = init_group_data()
+    chat_type = update.effective_chat.type
+    # Если команда вызвана в группе:
+    if chat_type != "private":
+        await update.message.reply_text(
+            f"Чтобы пройти опрос, напишите мне в личном чате, перейдя по ссылке:\n"
+            f"https://t.me/{BOT_USERNAME}?start=vote"
+        )
+        return
+
+    # Если /start вызван в ЛС (можно проверять параметр deep-link, если нужен)
+    if "group_answers" not in context.bot_data:
+        context.bot_data["group_answers"] = init_group_data()
+
+    # Удаляем предыдущие ответы этого пользователя (если есть)
+    user_id = update.effective_user.id
+    if user_id in context.bot_data["group_answers"]["office"]:
+        del context.bot_data["group_answers"]["office"][user_id]
+    if user_id in context.bot_data["group_answers"]["price_limit"]:
+        del context.bot_data["group_answers"]["price_limit"][user_id]
+    for field in ["wanted_cuisines", "food_restrictions", "walk_time"]:
+        for key in list(context.bot_data["group_answers"][field].keys()):
+            context.bot_data["group_answers"][field][key].discard(user_id)
+    context.bot_data["group_answers"]["all_users"].add(user_id)
+
     await update.message.reply_text(
-        "Привет! Все участники группы голосуют за предпочтения для обеда.\n\n1️⃣ Выберите ваш офис:",
+        "Привет! Давайте проведем опрос.\n\n1️⃣ Выберите ваш офис:",
         reply_markup=create_inline_keyboard(office_options, "office", set(), next_step="cuisine")
     )
     return OFFICE
 
-# Обработчик callback-запросов (нажатия кнопок)
+# Обработчик callback-запросов для индивидуального опроса в ЛС
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user_id = query.from_user.id
@@ -99,10 +119,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     group_data = context.bot_data["group_answers"]
     group_data["all_users"].add(user_id)
 
-    # Обработка возврата назад
+    # Обработка кнопки "⬅️ Назад"
     if action == "prev":
         if index == "office":
-            # Переходим к офису
             user_office = group_data["office"].get(user_id)
             selected = {user_office} if user_office else set()
             await query.edit_message_text(
@@ -152,7 +171,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elif action == "cuisine":
         selected_cuisine = cuisine_options[int(index)]
-        # Множественный выбор: добавляем/убираем пользователя в множестве
         if user_id in group_data["wanted_cuisines"][selected_cuisine]:
             group_data["wanted_cuisines"][selected_cuisine].remove(user_id)
         else:
@@ -208,13 +226,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
     elif action == "next" and index == "finish":
-        await query.edit_message_text("Готово! Введите /results, чтобы посмотреть итоговое распределение голосов.")
+        await query.edit_message_text(
+            "Опрос завершён!\n\nСпасибо за участие.\nВернитесь в группу, свайпнув вправо, и вызовите команду /results, чтобы посмотреть итоговую статистику."
+        )
         return
 
     await query.answer()
 
-# Команда /results — показать результаты опроса и итоговый словарь user_answers
+# Команда /results — доступна ТОЛЬКО в группе
 async def results(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        await update.message.reply_text("Команду /results можно использовать только в группе.")
+        return
+
     group_data = context.bot_data.get("group_answers", init_group_data())
     total_users = len(group_data["all_users"])
     if total_users == 0:
@@ -224,8 +248,7 @@ async def results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     def calculate_set_distribution(votes_dict):
         result = {}
         for option, users_set in votes_dict.items():
-            count = len(users_set)
-            result[option] = round(count / total_users, 2)
+            result[option] = round(len(users_set) / total_users, 2)
         return result
 
     def calculate_single_distribution(single_dict):
@@ -237,38 +260,24 @@ async def results(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result[option] = round(count / total_users, 2)
         return result
 
-    # Распределения для вопросов с множественным выбором
     wanted_cuisines_dist = calculate_set_distribution(group_data["wanted_cuisines"])
     food_restrictions_dist = calculate_set_distribution(group_data["food_restrictions"])
     walk_time_dist = calculate_set_distribution(group_data["walk_time"])
-    # Распределения для вопросов с одним выбором
     office_dist = calculate_single_distribution(group_data["office"])
     budget_dist = calculate_single_distribution(group_data["price_limit"])
 
-    # Определяем выбранный офис (наиболее популярных)
     chosen_office = max(office_dist, key=office_dist.get, default="Не выбрано")
 
-    # Преобразуем бюджет и время в пути в числовые значения для итогового словаря
     numeric_budget_dist = {}
     for option_str, weight in budget_dist.items():
-        if option_str in BUDGET_MAP:
-            numeric_budget_dist[BUDGET_MAP[option_str]] = weight
-        else:
-            numeric_budget_dist[option_str] = weight
+        numeric_budget_dist[BUDGET_MAP.get(option_str, option_str)] = weight
 
     numeric_walk_time_dist = {}
     for option_str, weight in walk_time_dist.items():
-        if option_str in WALK_TIME_MAP:
-            numeric_walk_time_dist[WALK_TIME_MAP[option_str]] = weight
-        else:
-            numeric_walk_time_dist[option_str] = weight
+        numeric_walk_time_dist[WALK_TIME_MAP.get(option_str, option_str)] = weight
 
-    # Можно убрать вариант "Нет ограничений", если он есть, или оставить
-    cleaned_food_restrictions = {
-        k: v for k, v in food_restrictions_dist.items() if k != "Нет ограничений" and v > 0
-    }
+    cleaned_food_restrictions = {k: v for k, v in food_restrictions_dist.items() if k != "Нет ограничений" and v > 0}
 
-    # Формируем итоговый словарь user_answers
     user_answers = {
         "wanted_cuisines": wanted_cuisines_dist,
         "price_limit": numeric_budget_dist,
@@ -278,7 +287,7 @@ async def results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     summary = (
         "📊 Итоговые предпочтения группы:\n\n"
-        f"1️⃣ Офис (максимум голосов): {chosen_office}\n\n"
+        f"1️⃣ Офис (наиболее голосов): {chosen_office}\n\n"
         "2️⃣ Желаемая кухня:\n" + "\n".join([f"{k}: {v}" for k, v in wanted_cuisines_dist.items()]) + "\n\n"
         "3️⃣ Ограничения по питанию:\n" + "\n".join([f"{k}: {v}" for k, v in food_restrictions_dist.items()]) + "\n\n"
         "4️⃣ Желаемый средний чек:\n" + "\n".join([f"{k}: {v}" for k, v in budget_dist.items()]) + "\n\n"
