@@ -380,9 +380,59 @@ def calculate_single_distribution(single_dict, total_users):
         result[option] = round(count / total_users, 2)
     return result
 
+def send_to_recommendation_module(user_answers: dict) -> str:
+    """
+    Заглушка для отправки данных в модуль рекомендаций.
+    Здесь в будущем будет реализована логика получения рекомендаций на основе user_answers.
+    Пока что функция просто логирует полученные данные и возвращает тестовый ответ.
+    """
+    import logging
+    logging.info("Отправка данных в модуль рекомендаций: %s", user_answers)
+    # Здесь можно сделать вызов реальной функции из модуля рекомендаций, например:
+    # return recommendation_module.get_recommendations(user_answers)
+    return "Заглушка: рекомендации пока не реализованы."
+
+
+def get_user_answers(group_data: dict) -> dict:
+    """
+    Формирует итоговый словарь user_answers на основе данных опроса.
+    """
+    total_users = len(group_data["all_users"])
+    if total_users == 0:
+        return {}
+
+    # Распределение голосов для вариантов с множественным выбором
+    wanted_cuisines_dist = calculate_set_distribution(group_data["wanted_cuisines"], total_users)
+    food_restrictions_dist = calculate_set_distribution(group_data["food_restrictions"], total_users)
+
+    # Распределение голосов для вариантов с одиночным выбором
+    walk_time_dist = calculate_single_distribution(group_data["walk_time"], total_users)
+    office_dist = calculate_single_distribution(group_data["office"], total_users)
+    budget_dist = calculate_single_distribution(group_data["price_limit"], total_users)
+
+    # Определяем офис с наибольшим числом голосов
+    chosen_office = max(office_dist, key=office_dist.get, default="Не выбрано")
+
+    # Преобразуем текстовые варианты для времени и бюджета в числовые значения
+    numeric_walk_time_dist = {WALK_TIME_MAP.get(option, option): val for option, val in walk_time_dist.items()}
+    numeric_budget_dist = {BUDGET_MAP.get(option, option): val for option, val in budget_dist.items()}
+
+    user_answers = {
+        "office": office_dist,           # распределение голосов по офисам
+        # "chosen_office": chosen_office,    # наиболее выбранный офис
+        "wanted_cuisines": wanted_cuisines_dist,
+        "price_limit": numeric_budget_dist,
+        "food_restrictions": food_restrictions_dist,
+        "walk_time": numeric_walk_time_dist
+    }
+
+    return clean_dict_keys(user_answers)
+
+
 async def poll_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Команда /pollresults – выводит результаты опроса для конкретной группы.
+    Кроме того, итоговый словарь user_answers отправляется в модуль рекомендаций.
     Доступна только в группе.
     """
     if update.effective_chat.type == "private":
@@ -395,36 +445,26 @@ async def poll_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пока никто не проголосовал.")
         return
 
-    total_users = len(group_data["all_users"])
-    wanted_cuisines_dist = calculate_set_distribution(group_data["wanted_cuisines"], total_users)
-    food_restrictions_dist = calculate_set_distribution(group_data["food_restrictions"], total_users)
-    walk_time_dist = calculate_single_distribution(group_data["walk_time"], total_users)
-    office_dist = calculate_single_distribution(group_data["office"], total_users)
-    budget_dist = calculate_single_distribution(group_data["price_limit"], total_users)
+    # Формируем итоговый словарь user_answers
+    user_answers = get_user_answers(group_data)
+    
+    # Отправляем данные в модуль рекомендаций (заглушка)
+    recommendations = send_to_recommendation_module(user_answers)
 
-    chosen_office = max(office_dist, key=office_dist.get, default="Не выбрано")
-    numeric_walk_time_dist = {WALK_TIME_MAP.get(option, option): val for option, val in walk_time_dist.items()}
-    numeric_budget_dist = {BUDGET_MAP.get(option, option): val for option, val in budget_dist.items()}
-
+    # Формируем текст для вывода результатов опроса
     summary = (
         "📊 Итоговые предпочтения:\n\n"
-        f"1️⃣ Офис (наиболее голосов): {chosen_office}\n\n"
-        "2️⃣ Желаемая кухня:\n" + "\n".join([f"{k}: {v}" for k, v in wanted_cuisines_dist.items()]) + "\n\n"
-        "3️⃣ Ограничения по питанию:\n" + "\n".join([f"{k}: {v}" for k, v in food_restrictions_dist.items()]) + "\n\n"
-        "4️⃣ Желаемый средний чек:\n" + "\n".join([f"{k}: {v}" for k, v in budget_dist.items()]) + "\n\n"
-        "5️⃣ Время в пути:\n" + "\n".join([f"{k}: {v}" for k, v in numeric_walk_time_dist.items()])
+        f"1️⃣ Офис (наиболее голосов): {user_answers.get('chosen_office', 'Не выбрано')}\n\n"
+        "2️⃣ Желаемая кухня:\n" + "\n".join([f"{k}: {v}" for k, v in user_answers.get("wanted_cuisines", {}).items()]) + "\n\n"
+        "3️⃣ Ограничения по питанию:\n" + "\n".join([f"{k}: {v}" for k, v in user_answers.get("food_restrictions", {}).items()]) + "\n\n"
+        "4️⃣ Желаемый средний чек:\n" + "\n".join([f"{k}: {v}" for k, v in user_answers.get("price_limit", {}).items()]) + "\n\n"
+        "5️⃣ Время в пути:\n" + "\n".join([f"{k}: {v}" for k, v in user_answers.get("walk_time", {}).items()]) + "\n\n"
+        "user_answers = " + json.dumps(user_answers, ensure_ascii=False) + "\n\n"
+        f"Рекомендации: {recommendations}"
     )
 
-    user_answers = {
-        "wanted_cuisines": wanted_cuisines_dist,
-        "price_limit": numeric_budget_dist,
-        "food_restrictions": food_restrictions_dist,
-        "walk_time": numeric_walk_time_dist
-    }
-    user_answers = clean_dict_keys(user_answers)
-
-    summary += "\n\n" + "user_answers = " + json.dumps(user_answers, ensure_ascii=False)
     await update.message.reply_text(summary)
+
 
 ##########################
 #  ЧАСТЬ 2. ПРИГЛАШЕНИЕ
