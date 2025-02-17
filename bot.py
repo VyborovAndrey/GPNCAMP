@@ -24,6 +24,31 @@ TOKEN = os.getenv("TOKEN")
 # Имя бота (без @)
 BOT_USERNAME = "LunchBuddy1Bot"
 
+# Функция для удаления эмодзи из строки
+def remove_emojis(text: str) -> str:
+    emoji_pattern = re.compile(
+        "["
+        u"\U0001F600-\U0001F64F"  # эмодзи лица
+        u"\U0001F300-\U0001F5FF"  # символы и пиктограммы
+        u"\U0001F680-\U0001F6FF"  # транспорт и карты
+        u"\U0001F1E0-\U0001F1FF"  # флаги
+        u"\U0001F900-\U0001F9FF"  # дополнительные эмодзи
+        "]+", 
+        flags=re.UNICODE
+    )
+    return emoji_pattern.sub("", text).strip()
+
+# Функция для рекурсивной очистки ключей словаря
+def clean_dict_keys(d: dict) -> dict:
+    cleaned = {}
+    for key, value in d.items():
+        new_key = remove_emojis(key) if isinstance(key, str) else key
+        if isinstance(value, dict):
+            cleaned[new_key] = clean_dict_keys(value)
+        else:
+            cleaned[new_key] = value
+    return cleaned
+
 ##########################
 #  ЧАСТЬ 1. ОПРОС (POLL)
 ##########################
@@ -396,6 +421,7 @@ async def poll_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "food_restrictions": food_restrictions_dist,
         "walk_time": numeric_walk_time_dist
     }
+    user_answers = clean_dict_keys(user_answers)
 
     summary += "\n\n" + "user_answers = " + json.dumps(user_answers, ensure_ascii=False)
     await update.message.reply_text(summary)
