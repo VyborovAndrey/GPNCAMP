@@ -78,7 +78,7 @@ def generate_queries_and_labels(patterns, counts, cuisines, dishes):
                 label_list[pos] = labels_temp
 
             label_list = flatten_dict(label_list)
-            queries.append([query.replace(" .", ".").replace(" ,", ",")])
+            queries.append([query.replace(" .", ".").replace(" ,", ",").replace("  ", " ")])
             labels.append(label_list)
 
     return queries, labels
