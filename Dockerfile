@@ -16,7 +16,4 @@ COPY . .
 # For more info, please refer to https://aka.ms/vscode-docker-python-configure-containers
 
 # During debugging, this entry point will be overridden. For more information, please refer to https://aka.ms/vscode-docker-python-debug
-CMD ["/bin/sh", "-c", "PASSWORD=$(jq -r '.ssl.certificatePassword' /ssl/config.json) && \
-    openssl pkcs12 -in /ssl/keystore.p12 -nokeys -out /ssl/fullchain.pem -passin pass:$PASSWORD && \
-    openssl pkcs12 -in /ssl/keystore.p12 -nocerts -nodes -out /ssl/privkey.pem -passin pass:$PASSWORD && \
-    gunicorn --bind 0.0.0.0:9999 --certfile=/ssl/fullchain.pem --keyfile=/ssl/privkey.pem DB:app"]
+CMD ["gunicorn --bind 0.0.0.0:9999 --certfile=/ssl/fullchain.pem --keyfile=/ssl/privkey.pem DB:app"]
