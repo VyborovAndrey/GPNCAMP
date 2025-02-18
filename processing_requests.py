@@ -41,7 +41,7 @@ class FoodAnalyzer:
 
     def analyze(self, text):
         inputs = self.tokenizer(
-            text, 
+            text.replace("ресторан","кухня").replace("кафе","кухня"), 
             return_tensors="pt", 
             truncation=True, 
             padding=True
@@ -155,10 +155,10 @@ class FoodAnalyzer:
         text = re.sub(r'[^\w\s]', '', text)
         return text.strip()
         
-    def _check_cuisine_similarity(self, text, threshold=70):
+    def _check_cuisine_similarity(self, text, threshold=60):
         return self._check_similarity(text, self.unique_cuisines, threshold)
         
-    def _check_dish_similarity(self, text, threshold=70):
+    def _check_dish_similarity(self, text, threshold=60):
         return self._check_similarity(text, self.unique_dishes, threshold)
         
     @staticmethod
@@ -171,6 +171,10 @@ class FoodAnalyzer:
                 max_similarity = similarity
                 best_match = target
         return best_match if max_similarity >= threshold else None
+    
+    @staticmethod
+    def filter_words(words):
+        return [word for word in words if not re.search(r'\(.*\)', word)]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Анализ предпочтений в еде')
@@ -198,3 +202,12 @@ if __name__ == "__main__":
     
     print("\nНегативные блюда:")
     print("\n".join(result['dish_negative']) if result['dish_negative'] else "-")
+
+    output_for_recommendation_system = {
+    'positive_cuisines': FoodAnalyzer.filter_words(result['cuisine_positive']),
+    'positive_dishes': FoodAnalyzer.filter_words(result['dish_positive']),
+    'negative_cuisines': FoodAnalyzer.filter_words(result['cuisine_negative']),
+    'negative_dishes': FoodAnalyzer.filter_words(result['dish_negative'])
+}
+
+    print (output_for_recommendation_system)
