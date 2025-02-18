@@ -59,13 +59,16 @@ def clean_dict_keys(d: dict) -> dict:
 # Функция инициализации хранилища данных для опроса (для конкретной группы)
 def init_group_data() -> Dict[str, Any]:
     return {
-        "office": {},           # Для инициатора – выбранный офис для группы
-        "wanted_cuisines": defaultdict(set),  # {вариант: {user_id, ...}}
-        "food_restrictions": defaultdict(set),# {вариант: {user_id, ...}}
-        "price_limit": {},      # {user_id: выбранный чек}
-        "walk_time": {},        # {user_id: выбранное время}
-        "all_users": set()      # все участники опроса
+        "office": {},
+        "wanted_cuisines": defaultdict(set),
+        "food_restrictions": defaultdict(set),
+        "price_limit": {},
+        "walk_time": {},
+        "all_users": set(),
+        "positive": "",
+        "negative": ""
     }
+
 
 # Карты для преобразования бюджетов и времени ходьбы в числовые значения
 BUDGET_MAP = {
@@ -315,10 +318,10 @@ async def show_state(query, state: str, user_id: int, group_data: dict, context:
     """
     if state == "finish":
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Написать желаемые блюда/кухни", callback_data="free_form_yes")]
+            [InlineKeyboardButton("Написать желаемые блюда/кухни", callback_data="free_form_positive")]
         ])
         await query.edit_message_text(
-            "Опрос завершён!\n\nСпасибо за участие.\n\nЕсть ли у Вас еще пожелания? Можете написать их! Буду рад учесть их для рекомендаций ☺️",
+            "Опрос завершён!\n\nСпасибо за участие.\n\nМожете написать блюда/кухни, которые особенно любите:",
             reply_markup=keyboard
         )
         return
@@ -360,8 +363,8 @@ def send_to_recommendation_module(user_answers: dict) -> str:
     logging.info("Отправка данных в модуль рекомендаций: %s", user_answers)
     # ЗДЕСЬ МОЖНО СДЕЛАТЬ ВЫЗОВ РЕАЛЬНОЙ ФУНКЦИИ ИЗ МОДУЛЯ РЕКОМЕНДАЦИЙ, НАПРИМЕР:
     # return recommendation_module.get_recommendations(user_answers)
-    # return "Заглушка: рекомендации пока не реализованы."
-    return requests.post(url='http://127.0.0.1:5002/recommendations', json=user_answers).json()
+    return "Заглушка: рекомендации пока не реализованы."
+    # return requests.post(url='http://127.0.0.1:5002/recommendations', json=user_answers).json()
 
 # Теперь формируем итоговый словарь без распределения по офисам – офис берётся из ответа инициатора
 def get_user_answers(group_data: dict, invitation: dict = None) -> dict:
@@ -389,9 +392,10 @@ def get_user_answers(group_data: dict, invitation: dict = None) -> dict:
         "wanted_cuisines": wanted_cuisines_dist,
         "food_restrictions": food_restrictions_dist,
         "price_limit": numeric_budget_dist,
-        "walk_time": numeric_walk_time_dist
+        "walk_time": numeric_walk_time_dist,
+        "positive": group_data.get("positive", "").replace("\n", " "),
+        "negative": group_data.get("negative", "").replace("\n", " "),
     }
-
     return clean_dict_keys(user_answers)
 
 # В команде /pollresults для группы выводим выбранный инициатором офис
@@ -692,29 +696,72 @@ def process_free_form_preference(free_text: str) -> str:
     return "Заглушка: обработка свободного ввода не реализована."
 
 async def free_form_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обрабатывает свободный текст, отправленный пользователем после завершения опроса.
-    Если установлен флаг free_form_input_expected, сообщение считается свободными предпочтениями.
-    """
     if update.effective_chat.type != "private":
         return
+
     if not context.user_data.get("free_form_input_expected", False):
         return
+
     free_text = update.message.text
-    response = process_free_form_preference(free_text)
-    # В ФУНКЦИИ ВЫШЕ ДОПУСТИМ МОДЕЛЬ, КОТОРАЯ ПОЛУЧАЕТ ТЕКСТ ОТ ПОЛЬЗОВАТЕЛЯ
-    await update.message.reply_text("Спасибо, ваши предпочтения учтены.")
-    context.user_data["free_form_input_expected"] = False
+    group_id = context.user_data.get("group_id")
+    if not group_id:
+        await update.message.reply_text("Ошибка: не найдена группа.")
+        return
+
+    group_data = context.bot_data["group_answers"].get(group_id, {})
+    mode = context.user_data.get("free_form_mode")
+
+    if mode == "positive":
+        # 1. Сохраняем в group_data["positive"]
+        if group_data["positive"]:
+            group_data["positive"] += "\n"
+        group_data["positive"] += free_text
+
+        # 2. Отправляем сообщение «спасибо» и предлагаем ввести «нежелательные»
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Написать нежелаемые блюда/кухни", callback_data="free_form_negative")]
+        ])
+        await update.message.reply_text(
+            "Спасибо, ваши предпочтения учтены.\n"
+            "Можете написать блюда/кухни, которые не любите:",
+            reply_markup=keyboard
+        )
+
+        # 3. Сбрасываем флаги
+        context.user_data["free_form_input_expected"] = False
+        context.user_data["free_form_mode"] = None
+
+    elif mode == "negative":
+        # 1. Сохраняем в group_data["negative"]
+        if group_data["negative"]:
+            group_data["negative"] += "\n"
+        group_data["negative"] += free_text
+
+        # 2. Подтверждаем и завершаем
+        await update.message.reply_text("Спасибо, это учтено! Ваши ответы сохранены.")
+        context.user_data["free_form_input_expected"] = False
+        context.user_data["free_form_mode"] = None
+
+
+
 
 async def free_form_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обрабатывает нажатие на кнопку для свободного ввода пожеланий.
-    После нажатия бот отправляет сообщение с просьбой перечислить блюда и кухни.
-    """
     query = update.callback_query
     await query.answer()
+    data = query.data
+
     context.user_data["free_form_input_expected"] = True
-    await query.edit_message_text("Перечисли блюда и кухни, которые тебе по вкусу")
+
+    if data == "free_form_positive":
+        context.user_data["free_form_mode"] = "positive"
+        await query.edit_message_text("Перечислите блюда и кухни, которые Вам особенно нравятся:")
+    elif data == "free_form_negative":
+        context.user_data["free_form_mode"] = "negative"
+        await query.edit_message_text("Перечислите блюда и кухни, которые Вам не по вкусу:")
+    else:
+        context.user_data["free_form_input_expected"] = False
+        await query.edit_message_text("Неизвестное действие.")
+
 
 ##########################
 #  ЕДИНЫЙ ВХОД /START
@@ -800,7 +847,7 @@ app.add_handler(CommandHandler("pollresults", poll_results))
 app.add_handler(CommandHandler("join", join))
 app.add_handler(CallbackQueryHandler(invitation_callback, pattern=r"^(invite_|invite_next)"))
 app.add_handler(CallbackQueryHandler(response_callback, pattern=r"^response_"))
-app.add_handler(CallbackQueryHandler(free_form_callback, pattern=r"^free_form_yes$"))
+app.add_handler(CallbackQueryHandler(free_form_callback, pattern=r"^free_form_(positive|negative)$"))
 app.add_handler(CommandHandler("invite_results", invitation_results))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, free_form_handler))
 app.run_polling()
