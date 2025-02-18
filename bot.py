@@ -2,6 +2,7 @@ import os
 import logging
 import json
 import re
+import requests
 from collections import defaultdict
 from typing import Set, Dict, Any
 from dotenv import load_dotenv
@@ -58,7 +59,7 @@ def clean_dict_keys(d: dict) -> dict:
 # Функция инициализации хранилища данных для опроса (для конкретной группы)
 def init_group_data() -> Dict[str, Any]:
     return {
-        "office": {},           # {user_id: выбранный офис}
+        "office": {},           # Для инициатора – выбранный офис для группы
         "wanted_cuisines": defaultdict(set),  # {вариант: {user_id, ...}}
         "food_restrictions": defaultdict(set),# {вариант: {user_id, ...}}
         "price_limit": {},      # {user_id: выбранный чек}
@@ -90,25 +91,18 @@ restriction_options = [
 budget_options = ["💵 До 500 руб.", "💵 До 1000 руб.", "💵 До 1500 руб.", "💵 Без разницы"]
 walk_time_options = ["🚶 До 5 минут", "🚶 До 10 минут", "🚶 До 15 минут"]
 
-# Конфигурация этапов опроса
+# Конфигурация этапов опроса для пользователей (в ЛС)
+# Здесь «office» больше не используется для приглашённых – их опрос начинается с кухни
 state_settings = {
-    "office": {
-        "text": "1️⃣ Выберите ваш офис:",
-        "options": office_options,
-        "prefix": "office",
-        "next_state": "cuisine",
-        "type": "single"  # выбор только один; переход осуществляется кнопкой "➡️ Далее"
-    },
     "cuisine": {
-        "text": "2️⃣ Выберите желаемую кухню (можно несколько):",
+        "text": "1️⃣ Выберите желаемую кухню (можно несколько):",
         "options": cuisine_options,
         "prefix": "cuisine",
         "next_state": "restrictions",
-        "prev_state": "office",
         "type": "multi"
     },
     "restrictions": {
-        "text": "3️⃣ Выберите ограничения по питанию (если есть):",
+        "text": "2️⃣ Выберите ограничения по питанию (если есть):",
         "options": restriction_options,
         "prefix": "restrictions",
         "next_state": "budget",
@@ -116,21 +110,30 @@ state_settings = {
         "type": "multi"
     },
     "budget": {
-        "text": "4️⃣ Выберите желаемый средний чек:",
+        "text": "3️⃣ Выберите желаемый средний чек:",
         "options": budget_options,
         "prefix": "budget",
         "next_state": "walk_time",
         "prev_state": "restrictions",
-        "type": "single"  # одиночный выбор, без автоперехода
+        "type": "single"
     },
     "walk_time": {
-        "text": "5️⃣ Выберите время в пути:",
+        "text": "4️⃣ Выберите время в пути:",
         "options": walk_time_options,
         "prefix": "walkTime",
         "next_state": "finish",
         "prev_state": "budget",
-        "type": "single"  # теперь выбор только один
+        "type": "single"
     }
+}
+
+# Конфигурация этапа для выбора офиса в группе (для инициатора)
+group_office_state = {
+    "text": "1️⃣ Выберите ваш офис:",
+    "options": office_options,
+    "prefix": "groupOffice",
+    "next_state": "invite",  # следующий этап – выбор участников
+    "type": "single"
 }
 
 def create_inline_keyboard(options, prefix, selected_values: Set[str], next_step=None, prev_step=None) -> InlineKeyboardMarkup:
@@ -155,10 +158,7 @@ def get_selected_values(state: str, user_id: int, group_data: dict) -> Set[str]:
     """
     Возвращает множество выбранных значений для конкретного этапа и пользователя.
     """
-    if state == "office":
-        value = group_data["office"].get(user_id)
-        return {value} if value else set()
-    elif state == "budget":
+    if state == "budget":
         value = group_data["price_limit"].get(user_id)
         return {value} if value else set()
     elif state == "walk_time":
@@ -170,36 +170,13 @@ def get_selected_values(state: str, user_id: int, group_data: dict) -> Set[str]:
         return {option for option, users in group_data["food_restrictions"].items() if user_id in users}
     return set()
 
-async def show_state(query, state: str, user_id: int, group_data: dict, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Отображает сообщение и клавиатуру для выбранного этапа опроса.
-    При состоянии "finish" отправляется дополнительное сообщение с приглашением 
-    оставить свободные предпочтения.
-    """
-    if state == "finish":
-        await query.edit_message_text("Опрос завершён!\n\nСпасибо за участие.")
-        await context.bot.send_message(
-            chat_id=query.message.chat.id,
-            text="По желанию, можете написать свои предпочтения в свободной форме. Буду рад учесть их для рекомендаций"
-        )
-        context.user_data["free_form_input_expected"] = True
-        return
-
-    settings = state_settings[state]
-    text = settings["text"]
-    options = settings["options"]
-    prefix = settings["prefix"]
-    next_state = settings.get("next_state")
-    prev_state = settings.get("prev_state")
-    selected = get_selected_values(state, user_id, group_data)
-    reply_markup = create_inline_keyboard(options, prefix, selected, next_step=next_state, prev_step=prev_state)
-    await query.edit_message_text(text, reply_markup=reply_markup)
-
-def reset_user_answers(user_id: int, group_data: dict):
+# Изменённая версия сброса ответов – для приглашённых не сбрасываем офис (если они организатор)
+def reset_user_answers(user_id: int, group_data: dict, skip_office=False):
     """
     Сбрасывает ответы пользователя (при повторном прохождении опроса).
     """
-    group_data["office"].pop(user_id, None)
+    if not skip_office:
+        group_data["office"].pop(user_id, None)
     group_data["price_limit"].pop(user_id, None)
     group_data["walk_time"].pop(user_id, None)
 
@@ -211,54 +188,65 @@ def reset_user_answers(user_id: int, group_data: dict):
 
     group_data["all_users"].add(user_id)
 
-async def poll_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# Обычный poll_callback для обработки выборов в ЛС
+async def poll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Запуск опроса в личном чате.
-    Теперь данные опроса сохраняются для конкретной группы, идентификатор которой хранится в context.user_data["group_id"].
+    Обработчик callback-запросов для опроса (для пользователей в ЛС).
     """
-    if update.effective_chat.type != "private":
-        await update.effective_message.reply_text("Пожалуйста, напишите мне в личном чате для прохождения опроса.")
-        return
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
 
-    # Получаем идентификатор группы, для которой запускается опрос
     group_id = context.user_data.get("group_id")
     if not group_id:
-        logging.error("Poll start: group_id не найден в user_data")
-        await update.message.reply_text("Ошибка: не удалось определить группу.")
+        logging.error("Poll callback: group_id не найден в user_data")
+        await query.answer("Ошибка: группа не определена.")
         return
 
-    if "group_answers" not in context.bot_data:
-        context.bot_data["group_answers"] = {}
-    if group_id not in context.bot_data["group_answers"]:
-        context.bot_data["group_answers"][group_id] = init_group_data()
-    group_data = context.bot_data["group_answers"][group_id]
+    group_data = context.bot_data.get("group_answers", {}).get(group_id)
+    if not group_data:
+        logging.error("Poll callback: данные опроса для группы %s не найдены", group_id)
+        await query.answer("Ошибка: данные опроса не найдены.")
+        return
 
-    user_id = update.effective_user.id
-    reset_user_answers(user_id, group_data)
+    group_data["all_users"].add(user_id)
 
-    initial_state = "office"
-    settings = state_settings[initial_state]
-    text = settings["text"]
-    reply_markup = create_inline_keyboard(settings["options"], settings["prefix"], set(), next_step=settings["next_state"])
-
-    if update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup)
-    elif update.callback_query and update.callback_query.message:
-        await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
+    data = query.data
+    if data.startswith("next_"):
+        next_state = data.split("_", 1)[1]
+        await handle_next(query, next_state, user_id, group_data, context)
+    elif data.startswith("prev_"):
+        prev_state = data.split("_", 1)[1]
+        await handle_prev(query, prev_state, user_id, group_data, context)
     else:
-        logging.error("Не найден объект сообщения для отправки опроса.")
+        try:
+            prefix, index_str = data.split("_", 1)
+            option_index = int(index_str)
+        except (ValueError, IndexError):
+            await query.answer("Некорректные данные!")
+            return
+
+        # Определяем этап по префиксу
+        state = None
+        for key, stg in state_settings.items():
+            if stg["prefix"] == prefix:
+                state = key
+                break
+        if not state:
+            await query.answer("Неизвестный этап!")
+            return
+
+        await handle_selection(query, state, option_index, user_id, group_data)
 
 async def handle_selection(update_query, state: str, option_index: int, user_id: int, group_data: dict):
     """
-    Обрабатывает выбор варианта для этапа опроса.
+    Обрабатывает выбор варианта для этапа опроса (для ЛС).
     """
     settings = state_settings[state]
     option = settings["options"][option_index]
 
     if settings["type"] == "single":
-        if state == "office":
-            group_data["office"][user_id] = option
-        elif state == "budget":
+        if state == "budget":
             group_data["price_limit"][user_id] = option
         elif state == "walk_time":
             group_data["walk_time"][user_id] = option
@@ -320,54 +308,30 @@ async def handle_next(update_query, next_state: str, user_id: int, group_data: d
 async def handle_prev(update_query, prev_state: str, user_id: int, group_data: dict, context: ContextTypes.DEFAULT_TYPE):
     await show_state(update_query, prev_state, user_id, group_data, context)
 
-async def poll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_state(query, state: str, user_id: int, group_data: dict, context: ContextTypes.DEFAULT_TYPE):
     """
-    Обработчик callback-запросов для опроса.
+    Отображает сообщение и клавиатуру для выбранного этапа опроса (в ЛС).
+    При состоянии "finish" выводится кнопка для свободного ввода пожеланий.
     """
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-
-    # Получаем group_id из user_data
-    group_id = context.user_data.get("group_id")
-    if not group_id:
-        logging.error("Poll callback: group_id не найден в user_data")
-        await query.answer("Ошибка: группа не определена.")
+    if state == "finish":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Написать желаемые блюда/кухни", callback_data="free_form_yes")]
+        ])
+        await query.edit_message_text(
+            "Опрос завершён!\n\nСпасибо за участие.\n\nЕсть ли у Вас еще пожелания? Можете написать их! Буду рад учесть их для рекомендаций ☺️",
+            reply_markup=keyboard
+        )
         return
 
-    group_data = context.bot_data.get("group_answers", {}).get(group_id)
-    if not group_data:
-        logging.error("Poll callback: данные опроса для группы %s не найдены", group_id)
-        await query.answer("Ошибка: данные опроса не найдены.")
-        return
-
-    group_data["all_users"].add(user_id)
-
-    data = query.data
-    if data.startswith("next_"):
-        next_state = data.split("_", 1)[1]
-        await handle_next(query, next_state, user_id, group_data, context)
-    elif data.startswith("prev_"):
-        prev_state = data.split("_", 1)[1]
-        await handle_prev(query, prev_state, user_id, group_data, context)
-    else:
-        try:
-            prefix, index_str = data.split("_", 1)
-            option_index = int(index_str)
-        except (ValueError, IndexError):
-            await query.answer("Некорректные данные!")
-            return
-
-        state = None
-        for key, stg in state_settings.items():
-            if stg["prefix"] == prefix:
-                state = key
-                break
-        if not state:
-            await query.answer("Неизвестный этап!")
-            return
-
-        await handle_selection(query, state, option_index, user_id, group_data)
+    settings = state_settings[state]
+    text = settings["text"]
+    options = settings["options"]
+    prefix = settings["prefix"]
+    next_state = settings.get("next_state")
+    prev_state = settings.get("prev_state")
+    selected = get_selected_values(state, user_id, group_data)
+    reply_markup = create_inline_keyboard(options, prefix, selected, next_step=next_state, prev_step=prev_state)
+    await query.edit_message_text(text, reply_markup=reply_markup)
 
 def calculate_set_distribution(votes_dict, total_users):
     """
@@ -391,53 +355,46 @@ def calculate_single_distribution(single_dict, total_users):
 
 def send_to_recommendation_module(user_answers: dict) -> str:
     """
-    Заглушка для отправки данных в модуль рекомендаций.
-    Здесь в будущем будет реализована логика получения рекомендаций на основе user_answers.
-    Пока что функция просто логирует полученные данные и возвращает тестовый ответ.
+    Функция логирует полученные данные и отправляет запрос в систему рекомендаций.
     """
-    import logging
     logging.info("Отправка данных в модуль рекомендаций: %s", user_answers)
     # ЗДЕСЬ МОЖНО СДЕЛАТЬ ВЫЗОВ РЕАЛЬНОЙ ФУНКЦИИ ИЗ МОДУЛЯ РЕКОМЕНДАЦИЙ, НАПРИМЕР:
     # return recommendation_module.get_recommendations(user_answers)
-    return "Заглушка: рекомендации пока не реализованы."
+    # return "Заглушка: рекомендации пока не реализованы."
+    return requests.post(url='http://127.0.0.1:5002/recommendations', json=user_answers).json()
 
-
-def get_user_answers(group_data: dict) -> dict:
-    """
-    Формирует итоговый словарь user_answers на основе данных опроса.
-    """
+# Теперь формируем итоговый словарь без распределения по офисам – офис берётся из ответа инициатора
+def get_user_answers(group_data: dict, invitation: dict = None) -> dict:
     total_users = len(group_data["all_users"])
     if total_users == 0:
         return {}
 
-    # Распределение голосов для вариантов с множественным выбором
     wanted_cuisines_dist = calculate_set_distribution(group_data["wanted_cuisines"], total_users)
     food_restrictions_dist = calculate_set_distribution(group_data["food_restrictions"], total_users)
-
-    # Распределение голосов для вариантов с одиночным выбором
     walk_time_dist = calculate_single_distribution(group_data["walk_time"], total_users)
-    office_dist = calculate_single_distribution(group_data["office"], total_users)
     budget_dist = calculate_single_distribution(group_data["price_limit"], total_users)
 
-    # Определяем офис с наибольшим числом голосов
-    chosen_office = max(office_dist, key=office_dist.get, default="Не выбрано")
-
-    # Преобразуем текстовые варианты для времени и бюджета в числовые значения
     numeric_walk_time_dist = {WALK_TIME_MAP.get(option, option): val for option, val in walk_time_dist.items()}
     numeric_budget_dist = {BUDGET_MAP.get(option, option): val for option, val in budget_dist.items()}
 
+    # Получаем офис, выбранный инициатором
+    if invitation:
+        organizer_id = invitation.get("organizer_id")
+        chosen_office = group_data["office"].get(organizer_id, "Не выбрано")
+    else:
+        chosen_office = "Не выбрано"
+
     user_answers = {
-        "office": office_dist,           # распределение голосов по офисам
-        # "chosen_office": chosen_office,    # наиболее выбранный офис
+        "office": chosen_office,
         "wanted_cuisines": wanted_cuisines_dist,
-        "price_limit": numeric_budget_dist,
         "food_restrictions": food_restrictions_dist,
+        "price_limit": numeric_budget_dist,
         "walk_time": numeric_walk_time_dist
     }
 
     return clean_dict_keys(user_answers)
 
-
+# В команде /pollresults для группы выводим выбранный инициатором офис
 async def poll_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Команда /pollresults – выводит результаты опроса для конкретной группы.
@@ -454,26 +411,25 @@ async def poll_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Пока никто не проголосовал.")
         return
 
-    # Формируем итоговый словарь user_answers
     user_answers = get_user_answers(group_data)
     
-    # Отправляем данные в модуль рекомендаций (заглушка)
-    recommendations = send_to_recommendation_module(user_answers)
+    # Получаем данные приглашения
+    invitation = get_invitation(group_id, context.bot_data)
+    # Передаём invitation в get_user_answers
+    user_answers = get_user_answers(group_data, invitation)
 
-    # Формируем текст для вывода результатов опроса
     summary = (
         "📊 Итоговые предпочтения:\n\n"
-        f"1️⃣ Офис (наиболее голосов): {user_answers.get('chosen_office', 'Не выбрано')}\n\n"
+        f"1️⃣ Офис: {user_answers.get('office')}\n\n"
         "2️⃣ Желаемая кухня:\n" + "\n".join([f"{k}: {v}" for k, v in user_answers.get("wanted_cuisines", {}).items()]) + "\n\n"
         "3️⃣ Ограничения по питанию:\n" + "\n".join([f"{k}: {v}" for k, v in user_answers.get("food_restrictions", {}).items()]) + "\n\n"
         "4️⃣ Желаемый средний чек:\n" + "\n".join([f"{k}: {v}" for k, v in user_answers.get("price_limit", {}).items()]) + "\n\n"
         "5️⃣ Время в пути:\n" + "\n".join([f"{k}: {v}" for k, v in user_answers.get("walk_time", {}).items()]) + "\n\n"
         "user_answers = " + json.dumps(user_answers, ensure_ascii=False) + "\n\n"
-        f"Рекомендации: {recommendations}"
+        f"Рекомендации: {send_to_recommendation_module(user_answers)}"
     )
 
     await update.message.reply_text(summary)
-
 
 ##########################
 #  ЧАСТЬ 2. ПРИГЛАШЕНИЕ
@@ -519,6 +475,7 @@ def create_response_keyboard(group_id):
     ]
     return InlineKeyboardMarkup(keyboard)
 
+# Команда /join для регистрации участников в группе (без изменений)
 async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Команда /join – участники группы регистрируются для приглашений.
@@ -532,10 +489,9 @@ async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     members[user.id] = user.full_name
     await update.message.reply_text(f"{user.full_name}, вы зарегистрированы для приглашений в этой группе.")
 
-async def start_invitation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Команда /start в группе – организатор создаёт приглашение.
-    """
+# Новая логика: инициатор в группе сначала отвечает на вопрос про офис,
+# а затем выбирает участников для приглашения.
+async def group_start_invitation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("Команда для приглашения доступна только в группе.")
@@ -544,20 +500,61 @@ async def start_invitation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     members = get_group_members(chat.id, context.bot_data)
     members[organizer.id] = organizer.full_name
 
+    # Инициализируем данные опроса для группы, если их ещё нет
+    if "group_answers" not in context.bot_data:
+        context.bot_data["group_answers"] = {}
+    if chat.id not in context.bot_data["group_answers"]:
+        context.bot_data["group_answers"][chat.id] = init_group_data()
+    
+    # Отправляем инициатору в группу вопрос по офису
+    text = group_office_state["text"]
+    reply_markup = create_inline_keyboard(group_office_state["options"], group_office_state["prefix"], set())
+    await update.message.reply_text(text, reply_markup=reply_markup)
+
+# Новый callback-обработчик для выбора офиса инициатором в группе
+async def group_office_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat = update.effective_chat  # группа
+    user_id = query.from_user.id
+
+    try:
+        prefix, index_str = query.data.split("_", 1)
+        option_index = int(index_str)
+    except Exception:
+        await query.answer("Некорректные данные!")
+        return
+
+    if prefix != "groupOffice":
+        await query.answer("Некорректные данные!")
+        return
+
+    group_id = chat.id
+    if group_id not in context.bot_data.get("group_answers", {}):
+        context.bot_data["group_answers"][group_id] = init_group_data()
+    group_data = context.bot_data["group_answers"][group_id]
+
+    # Сохраняем выбранный офис для инициатора
+    option = group_office_state["options"][option_index]
+    group_data["office"][user_id] = option
+
+    # Создаём приглашение с данными организатора
     invitation = {
-        "organizer_id": organizer.id,
-        "organizer_username": organizer.full_name,
+        "organizer_id": user_id,
+        "organizer_username": query.from_user.full_name,
         "invitees": set(),
         "responses": {}  # статусы: "pending", "accepted", "declined"
     }
-    set_invitation(chat.id, invitation, context.bot_data)
+    set_invitation(group_id, invitation, context.bot_data)
 
-    reply_markup = create_invitation_keyboard(chat.id, context.bot_data)
-    await update.message.reply_text(
-        f"{organizer.full_name}, выберите участников, которых хотите пригласить на обед:",
+    # Отправляем сообщение для выбора участников приглашения
+    reply_markup = create_invitation_keyboard(group_id, context.bot_data)
+    await query.edit_message_text(
+        f"{query.from_user.full_name}, ваш офис выбран: {option}.\n\nТеперь выберите участников, которых хотите пригласить на обед:",
         reply_markup=reply_markup
     )
 
+# Обработчик callback для приглашения
 async def invitation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Обработчик callback-запросов для выбора участников приглашения.
@@ -597,8 +594,8 @@ async def invitation_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             try:
                 await context.bot.send_message(
                     chat_id=uid,
-                    text=f"Вам пришло приглашение на сегодняшний обед. Примите его?",
-                    reply_markup=create_response_keyboard(chat.id)
+                    text=f"Вам пришло приглашение на сегодняшний обед из группы \"{query.message.chat.title}\". Примите его?",
+                    reply_markup=create_response_keyboard(query.message.chat.id)
                 )
             except Exception as e:
                 logging.error(f"Ошибка отправки сообщения пользователю {uid}: {e}")
@@ -632,7 +629,6 @@ async def response_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if decision == "accept":
         invitation["responses"][user_id] = "accepted"
-        # Сохраняем флаг и идентификатор группы в user_data, чтобы опрос знал, к какой группе относится
         context.user_data["invitation_accepted"] = True
         context.user_data["group_id"] = group_id
         await query.edit_message_text("Вы приняли приглашение на обед!\nЗапускаем опрос...")
@@ -706,15 +702,25 @@ async def free_form_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     free_text = update.message.text
     response = process_free_form_preference(free_text)
-    # Здесь можно сохранить free_text или передать его в модуль рекомендаций
-    # ЗДЕСЬ МОЖЕМ ОТПРАВИТЬ ПОЛУЧЕННЫЙ СВОБОДНЫЙ ТЕКСТ (response) В МОДЕЛЬ!!!
+    # В ФУНКЦИИ ВЫШЕ ДОПУСТИМ МОДЕЛЬ, КОТОРАЯ ПОЛУЧАЕТ ТЕКСТ ОТ ПОЛЬЗОВАТЕЛЯ
     await update.message.reply_text("Спасибо, ваши предпочтения учтены.")
     context.user_data["free_form_input_expected"] = False
+
+async def free_form_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обрабатывает нажатие на кнопку для свободного ввода пожеланий.
+    После нажатия бот отправляет сообщение с просьбой перечислить блюда и кухни.
+    """
+    query = update.callback_query
+    await query.answer()
+    context.user_data["free_form_input_expected"] = True
+    await query.edit_message_text("Перечисли блюда и кухни, которые тебе по вкусу")
 
 ##########################
 #  ЕДИНЫЙ ВХОД /START
 ##########################
 
+# Изменён: если команда /start вызвана в группе, запускается сначала этап выбора офиса (group_start_invitation)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Если команда /start вызвана в личном чате:
@@ -728,7 +734,57 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await poll_start(update, context)
     else:
-        await start_invitation(update, context)
+        await group_start_invitation(update, context)
+
+# Изменён: в ЛС опрос для приглашённых начинается с этапа "cuisine" (без вопроса об офисе)
+async def poll_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Запуск опроса в личном чате.
+    Теперь данные опроса сохраняются для конкретной группы, идентификатор которой хранится в context.user_data["group_id"].
+    """
+    if update.effective_chat.type != "private":
+        await update.effective_message.reply_text("Пожалуйста, напишите мне в личном чате для прохождения опроса.")
+        return
+
+    group_id = context.user_data.get("group_id")
+    if not group_id:
+        logging.error("Poll start: group_id не найден в user_data")
+        await update.message.reply_text("Ошибка: не удалось определить группу.")
+        return
+
+    if "group_answers" not in context.bot_data:
+        context.bot_data["group_answers"] = {}
+    if group_id not in context.bot_data["group_answers"]:
+        context.bot_data["group_answers"][group_id] = init_group_data()
+    group_data = context.bot_data["group_answers"][group_id]
+    user_id = update.effective_user.id
+
+    # Если пользователь является инициатором, не сбрасываем его офисный ответ
+    invitation = get_invitation(group_id, context.bot_data)
+    if invitation and invitation.get("organizer_id") == user_id:
+        skip_office = True
+    else:
+        skip_office = False
+
+    reset_user_answers(user_id, group_data, skip_office=skip_office)
+
+    # Начинаем опрос с этапа "cuisine"
+    initial_state = "cuisine"
+    settings = state_settings[initial_state]
+    text = settings["text"]
+    reply_markup = create_inline_keyboard(
+        settings["options"],
+        settings["prefix"],
+        get_selected_values(initial_state, user_id, group_data),
+        next_step=settings.get("next_state"),
+        prev_step=settings.get("prev_state")
+    )
+    if update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup)
+    elif update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(text, reply_markup=reply_markup)
+    else:
+        logging.error("Не найден объект сообщения для отправки опроса.")
 
 ##########################
 #  РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ
@@ -738,11 +794,13 @@ app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("hello", hello_command))
-app.add_handler(CallbackQueryHandler(poll_callback, pattern=r"^(office_|cuisine_|restrictions_|budget_|walkTime_|next_|prev_)"))
+app.add_handler(CallbackQueryHandler(poll_callback, pattern=r"^(cuisine_|restrictions_|budget_|walkTime_|next_|prev_)"))
+app.add_handler(CallbackQueryHandler(group_office_callback, pattern=r"^groupOffice_"))
 app.add_handler(CommandHandler("pollresults", poll_results))
 app.add_handler(CommandHandler("join", join))
 app.add_handler(CallbackQueryHandler(invitation_callback, pattern=r"^(invite_|invite_next)"))
 app.add_handler(CallbackQueryHandler(response_callback, pattern=r"^response_"))
+app.add_handler(CallbackQueryHandler(free_form_callback, pattern=r"^free_form_yes$"))
 app.add_handler(CommandHandler("invite_results", invitation_results))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, free_form_handler))
 app.run_polling()
