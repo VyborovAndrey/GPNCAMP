@@ -2,16 +2,18 @@ import os
 import logging
 import json
 import re
+from collections import defaultdict
+from typing import Set, Dict, Any
 from dotenv import load_dotenv
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
-    ContextTypes
+    ContextTypes,
+    MessageHandler,
+    filters
 )
-from collections import defaultdict
-from typing import Set, Dict, Any
 
 # Включаем логирование
 logging.basicConfig(
@@ -168,12 +170,19 @@ def get_selected_values(state: str, user_id: int, group_data: dict) -> Set[str]:
         return {option for option, users in group_data["food_restrictions"].items() if user_id in users}
     return set()
 
-async def show_state(query, state: str, user_id: int, group_data: dict):
+async def show_state(query, state: str, user_id: int, group_data: dict, context: ContextTypes.DEFAULT_TYPE):
     """
     Отображает сообщение и клавиатуру для выбранного этапа опроса.
+    При состоянии "finish" отправляется дополнительное сообщение с приглашением 
+    оставить свободные предпочтения.
     """
     if state == "finish":
         await query.edit_message_text("Опрос завершён!\n\nСпасибо за участие.")
+        await context.bot.send_message(
+            chat_id=query.message.chat.id,
+            text="По желанию, можете написать свои предпочтения в свободной форме. Буду рад учесть их для рекомендаций"
+        )
+        context.user_data["free_form_input_expected"] = True
         return
 
     settings = state_settings[state]
@@ -305,11 +314,11 @@ async def handle_selection(update_query, state: str, option_index: int, user_id:
                                      prev_step=settings.get("prev_state"))
         )
 
-async def handle_next(update_query, next_state: str, user_id: int, group_data: dict):
-    await show_state(update_query, next_state, user_id, group_data)
+async def handle_next(update_query, next_state: str, user_id: int, group_data: dict, context: ContextTypes.DEFAULT_TYPE):
+    await show_state(update_query, next_state, user_id, group_data, context)
 
-async def handle_prev(update_query, prev_state: str, user_id: int, group_data: dict):
-    await show_state(update_query, prev_state, user_id, group_data)
+async def handle_prev(update_query, prev_state: str, user_id: int, group_data: dict, context: ContextTypes.DEFAULT_TYPE):
+    await show_state(update_query, prev_state, user_id, group_data, context)
 
 async def poll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -337,10 +346,10 @@ async def poll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     if data.startswith("next_"):
         next_state = data.split("_", 1)[1]
-        await handle_next(query, next_state, user_id, group_data)
+        await handle_next(query, next_state, user_id, group_data, context)
     elif data.startswith("prev_"):
         prev_state = data.split("_", 1)[1]
-        await handle_prev(query, prev_state, user_id, group_data)
+        await handle_prev(query, prev_state, user_id, group_data, context)
     else:
         try:
             prefix, index_str = data.split("_", 1)
@@ -388,7 +397,7 @@ def send_to_recommendation_module(user_answers: dict) -> str:
     """
     import logging
     logging.info("Отправка данных в модуль рекомендаций: %s", user_answers)
-    # Здесь можно сделать вызов реальной функции из модуля рекомендаций, например:
+    # ЗДЕСЬ МОЖНО СДЕЛАТЬ ВЫЗОВ РЕАЛЬНОЙ ФУНКЦИИ ИЗ МОДУЛЯ РЕКОМЕНДАЦИЙ, НАПРИМЕР:
     # return recommendation_module.get_recommendations(user_answers)
     return "Заглушка: рекомендации пока не реализованы."
 
@@ -675,6 +684,34 @@ async def hello_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 ##########################
+#  ОБРАБОТКА СВОБОДНОГО ВВОДА
+##########################
+
+def process_free_form_preference(free_text: str) -> str:
+    """
+    Заглушка для обработки свободного ввода предпочтений.
+    Здесь можно реализовать отправку free_text в модель рекомендаций.
+    """
+    logging.info("Свободные предпочтения получены: %s", free_text)
+    return "Заглушка: обработка свободного ввода не реализована."
+
+async def free_form_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обрабатывает свободный текст, отправленный пользователем после завершения опроса.
+    Если установлен флаг free_form_input_expected, сообщение считается свободными предпочтениями.
+    """
+    if update.effective_chat.type != "private":
+        return
+    if not context.user_data.get("free_form_input_expected", False):
+        return
+    free_text = update.message.text
+    response = process_free_form_preference(free_text)
+    # Здесь можно сохранить free_text или передать его в модуль рекомендаций
+    # ЗДЕСЬ МОЖЕМ ОТПРАВИТЬ ПОЛУЧЕННЫЙ СВОБОДНЫЙ ТЕКСТ (response) В МОДЕЛЬ!!!
+    await update.message.reply_text("Спасибо, ваши предпочтения учтены.")
+    context.user_data["free_form_input_expected"] = False
+
+##########################
 #  ЕДИНЫЙ ВХОД /START
 ##########################
 
@@ -707,5 +744,5 @@ app.add_handler(CommandHandler("join", join))
 app.add_handler(CallbackQueryHandler(invitation_callback, pattern=r"^(invite_|invite_next)"))
 app.add_handler(CallbackQueryHandler(response_callback, pattern=r"^response_"))
 app.add_handler(CommandHandler("invite_results", invitation_results))
-
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, free_form_handler))
 app.run_polling()
