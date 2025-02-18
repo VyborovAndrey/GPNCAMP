@@ -65,8 +65,8 @@ def init_group_data() -> Dict[str, Any]:
         "price_limit": {},
         "walk_time": {},
         "all_users": set(),
-        "positive": "",
-        "negative": ""
+        "positive": {},   # Изменено: теперь хранится как dict, а не как строка
+        "negative": {}    # Аналогично
     }
 
 
@@ -387,14 +387,17 @@ def get_user_answers(group_data: dict, invitation: dict = None) -> dict:
     else:
         chosen_office = "Не выбрано"
 
+    positive_text = "\n".join(group_data["positive"].values()).replace("\n", " ")
+    negative_text = "\n".join(group_data["negative"].values()).replace("\n", " ")
+
     user_answers = {
         "office": chosen_office,
         "wanted_cuisines": wanted_cuisines_dist,
         "food_restrictions": food_restrictions_dist,
         "price_limit": numeric_budget_dist,
         "walk_time": numeric_walk_time_dist,
-        "positive": group_data.get("positive", "").replace("\n", " "),
-        "negative": group_data.get("negative", "").replace("\n", " "),
+        "positive": positive_text,
+        "negative": negative_text,
     }
     return clean_dict_keys(user_answers)
 
@@ -710,14 +713,11 @@ async def free_form_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     group_data = context.bot_data["group_answers"].get(group_id, {})
     mode = context.user_data.get("free_form_mode")
+    user_id = update.effective_user.id
 
     if mode == "positive":
-        # 1. Сохраняем в group_data["positive"]
-        if group_data["positive"]:
-            group_data["positive"] += "\n"
-        group_data["positive"] += free_text
-
-        # 2. Отправляем сообщение «спасибо» и предлагаем ввести «нежелательные»
+        # Сохраняем (перезаписываем) ответ именно для данного пользователя
+        group_data["positive"][user_id] = free_text
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Написать нежелаемые блюда/кухни", callback_data="free_form_negative")]
         ])
@@ -726,21 +726,13 @@ async def free_form_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Можете написать блюда/кухни, которые не любите:",
             reply_markup=keyboard
         )
-
-        # 3. Сбрасываем флаги
-        context.user_data["free_form_input_expected"] = False
-        context.user_data["free_form_mode"] = None
-
     elif mode == "negative":
-        # 1. Сохраняем в group_data["negative"]
-        if group_data["negative"]:
-            group_data["negative"] += "\n"
-        group_data["negative"] += free_text
-
-        # 2. Подтверждаем и завершаем
+        group_data["negative"][user_id] = free_text
         await update.message.reply_text("Спасибо, это учтено! Ваши ответы сохранены.")
-        context.user_data["free_form_input_expected"] = False
-        context.user_data["free_form_mode"] = None
+
+    context.user_data["free_form_input_expected"] = False
+    context.user_data["free_form_mode"] = None
+
 
 
 
